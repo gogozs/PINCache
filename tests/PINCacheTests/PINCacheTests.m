@@ -6,7 +6,7 @@
 #import "PINCache.h"
 
 static NSString * const PINCacheTestName = @"PINCacheTest";
-static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
+const NSTimeInterval PINCacheTestBlockTimeout = 20.0;
 
 @interface PINDiskCache()
 
@@ -257,6 +257,17 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
     XCTAssertTrue(self.cache.memoryCache.totalCost == 1, @"cache had an unexpected total cost");
 }
 
+- (void)testMemoryCostOnReplace
+{
+    NSString *key1 = @"key1";
+
+    for(int i=0; i<10; i++) {
+        [self.cache.memoryCache setObject:key1 forKey:key1 withCost:1];
+    }
+
+    XCTAssertTrue(self.cache.memoryCache.totalCost == 1, @"cache had an unexpected total cost");
+}
+
 - (void)testMemoryCostByDate
 {
     NSString *key1 = @"key1";
@@ -307,26 +318,25 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
         NSString *key = [[NSString alloc] initWithFormat:@"key %lu", (unsigned long)i];
         NSString *obj = [[NSString alloc] initWithFormat:@"obj %lu", (unsigned long)i];
         
-        [self.cache setObject:obj forKey:key block:nil];
-
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-retain-cycles"
         dispatch_group_enter(group);
-    }
-    
-    for (NSUInteger i = 0; i < max; i++) {
-        NSString *key = [[NSString alloc] initWithFormat:@"key %lu", (unsigned long)i];
-        
-        [self.cache objectForKey:key block:^(PINCache *cache, NSString *key, id object) {
+        [self.cache setObject:obj forKey:key block:^(PINCache * _Nonnull cache, NSString * _Nonnull key, id  _Nullable object) {
             dispatch_async(queue, ^{
-                NSString *obj = [[NSString alloc] initWithFormat:@"obj %lu", (unsigned long)i];
-                XCTAssertTrue([object isEqualToString:obj] == YES, @"object returned was not object set");
-                count -= 1;
-                dispatch_group_leave(group);
+                [self.cache objectForKey:key block:^(PINCache * _Nonnull cache, NSString * _Nonnull key, id  _Nullable object) {
+                    NSString *obj = [[NSString alloc] initWithFormat:@"obj %lu", (unsigned long)i];
+                    XCTAssertTrue([object isEqualToString:obj] == YES, @"object returned was not object set");
+                    count -= 1;
+                    dispatch_group_leave(group);
+                }];
             });
         }];
     }
+#pragma clang diagnostic pop
     
-    dispatch_group_wait(group, [self timeout]);
+    NSUInteger success = dispatch_group_wait(group, [self timeout]);
 
+    XCTAssert(success == 0, @"Timed out waiting on operations");
     XCTAssertTrue(count == 0, @"one or more object blocks failed to execute, possible queue deadlock");
 }
 
@@ -447,7 +457,7 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
         NSString *key = [[NSString alloc] initWithFormat:@"key %zd", index];
         NSString *obj = [[NSString alloc] initWithFormat:@"obj %zd", index];
         dispatch_group_enter(group);
-        [self.cache.diskCache setObject:obj forKey:key block:^(PINDiskCache *cache, NSString *key, id<NSCoding> object, NSURL *fileURL) {
+        [self.cache.diskCache setObject:obj forKey:key block:^(PINDiskCache *cache, NSString *key, id<NSCoding> object) {
             dispatch_group_leave(group);
         }];
     });
@@ -458,7 +468,7 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
 
     __block NSUInteger enumCount = 0;
 
-    [self.cache.diskCache enumerateObjectsWithBlock:^(PINDiskCache *cache, NSString *key, id <NSCoding> object, NSURL *fileURL) {
+    [self.cache.diskCache enumerateObjectsWithBlock:^(NSString *key, NSURL *fileURL) {
         enumCount++;
     } completionBlock:^(PINDiskCache *cache) {
         dispatch_semaphore_signal(semaphore);
@@ -515,7 +525,7 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
     }];
     
     dispatch_group_enter(group);
-    [self.cache.diskCache objectForKey:key block:^(PINDiskCache *cache, NSString *key, id<NSCoding> object, NSURL *fileURL) {
+    [self.cache.diskCache objectForKey:key block:^(PINDiskCache *cache, NSString *key, id<NSCoding> object) {
         diskObj = object;
         dispatch_group_leave(group);
     }];
@@ -524,11 +534,11 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
     
     XCTAssert(memObj != nil, @"should still be in memory cache");
     XCTAssert(diskObj != nil, @"should still be in disk cache");
-    
-    sleep(2);
-    
+  
     [self.cache.memoryCache setAgeLimit:1];
     [self.cache.diskCache setAgeLimit:1];
+  
+    sleep(2);
     
     dispatch_group_enter(group);
     [self.cache.memoryCache objectForKey:key block:^(PINMemoryCache *cache, NSString *key, id object) {
@@ -537,7 +547,7 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
     }];
     
     dispatch_group_enter(group);
-    [self.cache.diskCache objectForKey:key block:^(PINDiskCache *cache, NSString *key, id<NSCoding> object, NSURL *fileURL) {
+    [self.cache.diskCache objectForKey:key block:^(PINDiskCache *cache, NSString *key, id<NSCoding> object) {
         diskObj = object;
         dispatch_group_leave(group);
     }];
@@ -565,9 +575,11 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
   __block NSURL *diskFileURL = nil;
   dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
 
-  [self.cache.diskCache setObject:[self image] forKey:key block:^(PINDiskCache *cache, NSString *key, id<NSCoding> object, NSURL *fileURL) {
-    diskFileURL = fileURL;
-    dispatch_semaphore_signal(semaphore);
+  [self.cache.diskCache setObject:[self image] forKey:key block:^(PINDiskCache *cache, NSString *key, id<NSCoding> object) {
+    [cache fileURLForKey:key block:^(NSString * _Nonnull key, NSURL * _Nullable fileURL) {
+        diskFileURL = fileURL;
+        dispatch_semaphore_signal(semaphore);
+    }];
   }];
   
   dispatch_semaphore_wait(semaphore, [self timeout]);
@@ -608,7 +620,7 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
     }];
 
     dispatch_group_enter(group);
-    [self.cache.diskCache objectForKey:key block:^(PINDiskCache *cache, NSString *key, id<NSCoding> object, NSURL *fileURL) {
+    [self.cache.diskCache objectForKey:key block:^(PINDiskCache *cache, NSString *key, id<NSCoding> object) {
         diskObj = object;
         dispatch_group_leave(group);
     }];
@@ -632,7 +644,7 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
     }];
 
     dispatch_group_enter(group);
-    [self.cache.diskCache objectForKey:key block:^(PINDiskCache *cache, NSString *key, id<NSCoding> object, NSURL *fileURL) {
+    [self.cache.diskCache objectForKey:key block:^(PINDiskCache *cache, NSString *key, id<NSCoding> object) {
         diskObj = object;
         dispatch_group_leave(group);
     }];
@@ -663,7 +675,7 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
     // Wait for ttlCache to be set
     dispatch_group_t group = dispatch_group_create();
     dispatch_group_enter(group);
-    [self.cache.diskCache objectForKey:key block:^(PINDiskCache * _Nonnull cache, NSString * _Nonnull key, id<NSCoding>  _Nullable object, NSURL * _Nullable fileURL) {
+    [self.cache.diskCache objectForKey:key block:^(PINDiskCache * _Nonnull cache, NSString * _Nonnull key, id<NSCoding>  _Nullable object) {
         dispatch_group_leave(group);
     }];
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
@@ -671,14 +683,14 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
     // With the TTL cache enabled, we expect enumerating over the caches to yield 0 objects
     NSUInteger expectedObjCount = 0;
     __block NSUInteger objCount = 0;
-    [self.cache.diskCache enumerateObjectsWithBlock:^(PINDiskCache * _Nonnull cache, NSString * _Nonnull key, id<NSCoding>  _Nullable object, NSURL * _Nullable fileURL) {
+    [self.cache.diskCache enumerateObjectsWithBlock:^(NSString * _Nonnull key, NSURL * _Nullable fileURL) {
       objCount++;
     }];
 
     XCTAssertEqual(objCount, expectedObjCount, @"Expected %lu objects in the cache", (unsigned long)expectedObjCount);
 
     objCount = 0;
-    [self.cache.memoryCache enumerateObjectsWithBlock:^(PINMemoryCache * _Nonnull cache, NSString * _Nonnull key, id  _Nullable object) {
+    [self.cache.memoryCache enumerateObjectsWithBlock:^(PINMemoryCache *cache, NSString *key, id __nullable object) {
       objCount++;
     }];
 
@@ -689,7 +701,7 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
 
     // Wait for ttlCache to be set
     dispatch_group_enter(group);
-    [self.cache.diskCache objectForKey:key block:^(PINDiskCache * _Nonnull cache, NSString * _Nonnull key, id<NSCoding>  _Nullable object, NSURL * _Nullable fileURL) {
+    [self.cache.diskCache objectForKey:key block:^(PINDiskCache * _Nonnull cache, NSString * _Nonnull key, id<NSCoding>  _Nullable object) {
         dispatch_group_leave(group);
     }];
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
@@ -697,7 +709,7 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
     // With the TTL cache disabled, we expect enumerating over the caches to yield 1 object each, since the 2nd cache clearing hasn't happened yet
     expectedObjCount = 1;
     objCount = 0;
-    [self.cache.diskCache enumerateObjectsWithBlock:^(PINDiskCache * _Nonnull cache, NSString * _Nonnull key, id<NSCoding>  _Nullable object, NSURL * _Nullable fileURL) {
+    [self.cache.diskCache enumerateObjectsWithBlock:^(NSString * _Nonnull key, NSURL * _Nullable fileURL) {
       objCount++;
     }];
 
@@ -717,12 +729,17 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
     dispatch_group_t group = dispatch_group_create();
     dispatch_group_enter(group);
     __block NSURL *objectURL = nil;
-    [self.cache.diskCache setObject:[self image] forKey:key block:^(PINDiskCache * _Nonnull cache, NSString * _Nonnull key, id<NSCoding>  _Nullable object, NSURL * _Nullable fileURL) {
-      objectURL = fileURL;
-      dispatch_group_leave(group);
+    [self.cache.diskCache setObject:[self image] forKey:key block:^(PINDiskCache * _Nonnull cache, NSString * _Nonnull key, id<NSCoding>  _Nullable object) {
+        [cache fileURLForKey:key block:^(NSString * _Nonnull key, NSURL * _Nullable fileURL) {
+            objectURL = fileURL;
+            dispatch_group_leave(group);
+        }];
     }];
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
     XCTAssertNotNil(objectURL, @"objectURL should have a non-nil URL");
+    
+    // Wait a moment to ensure that the file modification time is set (done asynchronously)
+    sleep(1);
 
     NSError *error = nil;
     NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:[objectURL path] error:&error];
@@ -733,14 +750,15 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
     sleep(1);
 
     [self.cache.diskCache setTtlCache:YES];
+    
     // Wait for ttlCache to be set
-    dispatch_group_enter(group);
-    [self.cache.diskCache objectForKey:key block:^(PINDiskCache * _Nonnull cache, NSString * _Nonnull key, id<NSCoding>  _Nullable object, NSURL * _Nullable fileURL) {
-      dispatch_group_leave(group);
-    }];
-    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
-
+    sleep(1);
+    
+    [self.cache.diskCache objectForKey:key];
     [self.cache.diskCache fileURLForKey:key];
+    
+    // Wait a moment to ensure that the file modification time is set (done asynchronously)
+    sleep(1);
 
     attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:[objectURL path] error:nil];
     NSDate *ttlCacheEnabledModificationDate = attributes[NSFileModificationDate];
@@ -749,14 +767,15 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
     XCTAssertEqualObjects(initialModificationDate, ttlCacheEnabledModificationDate, @"The modification date shouldn't change when accessing the file URL, when ttlCache is enabled");
 
     [self.cache.diskCache setTtlCache:NO];
+    
     // Wait for ttlCache to be set
-    dispatch_group_enter(group);
-    [self.cache.diskCache objectForKey:key block:^(PINDiskCache * _Nonnull cache, NSString * _Nonnull key, id<NSCoding>  _Nullable object, NSURL * _Nullable fileURL) {
-      dispatch_group_leave(group);
-    }];
-    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
-
+    sleep(1);
+    
+    [self.cache.diskCache objectForKey:key];
     [self.cache.diskCache fileURLForKey:key];
+    
+    // Wait a moment to ensure that the file modification time is set (done asynchronously)
+    sleep(1);
 
     attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:[objectURL path] error:nil];
     NSDate *ttlCacheDisabledModificationDate = attributes[NSFileModificationDate];
@@ -764,6 +783,83 @@ static const NSTimeInterval PINCacheTestBlockTimeout = 10.0;
 
     XCTAssertNotEqualObjects(initialModificationDate, ttlCacheDisabledModificationDate, @"The modification date should change when accessing the file URL, when ttlCache is not enabled");
 
+}
+
+- (void)testAsyncDiskInitialization
+{
+    NSString * const cacheName = @"testAsyncDiskInitialization";
+    PINDiskCache *testCache = [[PINDiskCache alloc] initWithName:cacheName];
+    NSURL *testCacheURL = testCache.cacheURL;
+    NSError *error = nil;
+    
+    //Make sure the cache URL does not exist.
+    if ([[NSFileManager defaultManager] fileExistsAtPath:[testCacheURL path]]) {
+        [[NSFileManager defaultManager] removeItemAtURL:testCacheURL error:&error];
+        XCTAssertNil(error);
+    }
+    
+    testCache = [[PINDiskCache alloc] initWithName:cacheName];
+    //This should not return until *after* disk cache directory has been created
+    [testCache objectForKey:@"some bogus key"];
+    XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:[testCacheURL path]]);
+}
+
+- (void)testCustomFileExtension {
+    
+    PINCache *cache = [[PINCache alloc] initWithName:[[NSUUID UUID] UUIDString] fileExtension:@"obj"];
+    
+    NSString *key = @"key";
+    __block NSURL *diskFileURL = nil;
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    
+    [cache.diskCache setObject:[self image] forKey:key block:^(PINDiskCache *cache, NSString *key, id<NSCoding> object) {
+        [cache fileURLForKey:key block:^(NSString * _Nonnull key, NSURL * _Nullable fileURL) {
+            diskFileURL = fileURL;
+            dispatch_semaphore_signal(semaphore);
+        }];
+    }];
+    
+    dispatch_semaphore_wait(semaphore, [self timeout]);
+    
+    XCTAssertNotNil(diskFileURL.pathExtension);
+    XCTAssertEqualObjects(diskFileURL.pathExtension, @"obj");
+    
+}
+
+- (void)testDiskCacheSet
+{
+  PINDiskCache *testCache = [[PINDiskCache alloc] initWithName:@"testDiskCacheSet"];
+  const NSUInteger objectCount = 100;
+  [self measureBlock:^{
+    for (NSUInteger idx = 0; idx < objectCount; idx++) {
+      [testCache setObject:[@(idx) stringValue] forKey:[@(idx) stringValue]];
+    }
+  }];
+}
+
+- (void)testDiskCacheHit
+{
+  PINDiskCache *testCache = [[PINDiskCache alloc] initWithName:@"textDiskCacheHit"];
+  const NSUInteger objectCount = 100;
+  for (NSUInteger idx = 0; idx < objectCount; idx++) {
+    [testCache setObject:[@(idx) stringValue] forKey:[@(idx) stringValue]];
+  }
+  [self measureBlock:^{
+    for (NSUInteger idx = 0; idx < objectCount; idx++) {
+      [testCache objectForKey:[@(idx) stringValue]];
+    }
+  }];
+}
+
+- (void)testDiskCacheMiss
+{
+  PINDiskCache *testCache = [[PINDiskCache alloc] initWithName:@"testDiskCacheMiss"];
+  const NSUInteger objectCount = 100;
+  [self measureBlock:^{
+    for (NSUInteger idx = 0; idx < objectCount; idx++) {
+      [testCache objectForKey:[@(idx) stringValue]];
+    }
+  }];
 }
 
 @end
